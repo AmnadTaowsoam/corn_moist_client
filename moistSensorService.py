@@ -7,7 +7,7 @@ import logging
 import warnings
 import requests
 import json
-
+#
 warnings.filterwarnings('ignore')
 # Logging and Configuration
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
