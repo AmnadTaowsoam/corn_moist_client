@@ -1,78 +1,52 @@
-from fastapi import FastAPI, HTTPException
-from moistSensorService import MoistureSensor
-import uvicorn
-import httpx
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel
+from typing import List
 import configparser
-from datetime import datetime, timedelta
-
-class TokenManager:
-    def __init__(self):
-        self.token = None
-        self.token_expiry = datetime.now()
-
-    def set_token(self, token, expires_in=3600):
-        self.token = token
-        self.token_expiry = datetime.now() + timedelta(seconds=expires_in)
-
-    def is_token_expired(self):
-        return datetime.now() >= self.token_expiry
+import joblib
+import pandas as pd
+import numpy as np
+import json
 
 app = FastAPI()
-token_manager = TokenManager()
-# อ่านค่าจาก config.ini
-config = configparser.ConfigParser()
-config.read('config.ini')
-sensor_config = config['MoistureSensor']
-server_config = config['ServerCredentials']
-sensorId = sensor_config.get('sensorId')
 
-# สร้างอินสแตนซ์ของ MoistureSensor
-sensor = MoistureSensor()
+class MoistureData(BaseModel):
+    value: List[int]
 
-async def get_token():
-    if token_manager.token is None or token_manager.is_token_expired():
-        url = server_config['ENDPOINT'] + "/login"
-        data = {
-            "username": server_config['username'],
-            "password": server_config['password']
-        }
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, json=data)
-            response.raise_for_status()
-            new_token = response.json()["token"]
-            # สมมติว่าเวลาหมดอายุของ token อยู่ใน response, หรือใช้ค่า default
-            token_manager.set_token(new_token, expires_in=3600)  # Adjust expires_in accordingly
-    return token_manager.token
+class ModelMoisture:
+    def __init__(self, config_path='config.ini'):
+        self.config = configparser.ConfigParser()
+        self.config.read(config_path)
+        model_config = self.config['Model_Path']
+        self.loaded_model = joblib.load(r"D:\OneDrive - Betagro Public Company Limited\Project\Moisture Sensor Online\Python Code\Rev3\corn_moist_client\linear_moisture_model.pkl")
 
-async def refresh_token(token: str):
-    url = server_config['ENDPOINT'] + "/refresh_token"
-    headers = {"Authorization": f"Bearer {token}"}
-    async with httpx.AsyncClient() as client:
-        response = await client.post(url, headers=headers)
-        response.raise_for_status()
-        return response.json()["access_token"]
+    def predict(self, data):
+        # สร้าง DataFrame จากข้อมูลที่รับมา
+        data_df = pd.DataFrame(data, columns=['sensorValueMoisture'])  # ให้ 'feature_name' เป็นชื่อคอลัมน์ที่โมเดลคาดหวัง
+        # ทำนายผล
+        prediction = self.loaded_model.predict(data_df)
+        return prediction
 
-@app.get("/moisture")
-async def read_moisture():
-    data = sensor.read_data()
-    if data is not None:
-        try:
-            token = await get_token()
-            # ใช้ token ที่ได้จาก TokenManager
-            url = server_config['url']
-            headers = {"Authorization": f"Bearer {token}"}
-            payload = {"sensor_id": sensorId, "moisture": data}
-            async with httpx.AsyncClient() as client:
-                response = await client.post(url, json=payload, headers=headers)
-                response.raise_for_status()
-                return response.json()
-        except httpx.HTTPStatusError as e:
-            raise HTTPException(status_code=e.response.status_code, detail=str(e))
-    else:
-        return {"error": "Failed to read data from the moisture sensor"}
+# สร้างอินสแตนซ์ของ ModelMoisture
+model_moisture = ModelMoisture()
 
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8007)
+@app.post("/moisture")
+async def receive_moisture_data(request: Request):
+    # อ่านข้อมูล JSON จาก request body
+    data = await request.json()
+    # สร้างอินสแตนซ์ของ MoistureData จากข้อมูล JSON
+    moisture_data = MoistureData(**data)
+    # ทำการประมวณผลหลักแรกของข้อมูล Mode F
+    first_number = moisture_data.value[0]
+    print(f"Received moisture sensor data Mode F: {first_number}")
 
+    # ทำนายผลโดยใช้ model
+    prediction = model_moisture.predict(moisture_data.value)
 
+    # แปลงค่าที่ทำนายได้เป็น JSON
+    prediction_json = json.dumps({"predicted_moisture": prediction[0].tolist()})
 
+    # พิมพ์ผลลัพธ์การทำนายในรูปแบบ JSON
+    print(f"Prediction JSON (Index 0): {prediction_json}")
+
+    # ส่งคืนข้อมูลที่ได้รับและผลการทำนายในรูปแบบ JSON
+    return {"status": "success", "received_first_value": first_number, "prediction_json": prediction_json}
